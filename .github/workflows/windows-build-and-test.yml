@@ -141,3 +141,59 @@ jobs:
           }
           
           runTests
+
+      - name: Install packaging tools
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          python "${{ env.CRAFT_MASTER_LOCATION }}\CraftMaster.py" --config "${{ env.CRAFT_MASTER_CONFIG }}" --target ${{ env.CRAFT_TARGET }} -c dev-utils/nsis
+
+      - name: Package installer
+        shell: pwsh
+        run: |
+          function craft() {
+              python "${{ env.CRAFT_MASTER_LOCATION }}\CraftMaster.py" --config "${{ env.CRAFT_MASTER_CONFIG }}" --target ${{ env.CRAFT_TARGET }} -c $args
+              if($LASTEXITCODE -ne 0) {exit $LASTEXITCODE}
+          }
+
+          craft --src-dir ${{ github.workspace }} --package nextcloud-client
+
+      - name: Collect installer
+        if: always()
+        shell: pwsh
+        run: |
+          $root = "${{ github.workspace }}\${{ env.CRAFT_TARGET }}"
+          $out = "${{ github.workspace }}\installer"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          $found = Get-ChildItem -Path $root -Recurse -File -Filter *.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match '^nextcloud-.*\.exe$' }
+
+          if(!$found) {
+              Write-Host "No installer matched. Contents of $root\tmp:"
+              Get-ChildItem -Path "$root\tmp" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
+          }
+
+          $found | Select-Object FullName, Length | Format-Table -AutoSize
+          $found | ForEach-Object { Copy-Item $_.FullName $out }
+
+          @(
+              "source repository: ${{ github.repository }}"
+              "source commit:     ${{ github.event.pull_request.head.sha || github.sha }}"
+              "upstream pull request: https://github.com/nextcloud/desktop/pull/10850"
+              "built by:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              "built at:          $((Get-Date).ToUniversalTime().ToString('u'))"
+              ""
+              "Unsigned build from a fork, produced for the measurements requested on the pull request."
+          ) | Out-File -FilePath "$out\BUILD-INFO.txt" -Encoding utf8
+
+          Get-FileHash -Algorithm SHA256 -Path "$out\*.exe" | Format-List
+
+      - name: Upload installer
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nextcloud-client-windows-installer
+          path: installer/*
+          if-no-files-found: error
+          overwrite: true
