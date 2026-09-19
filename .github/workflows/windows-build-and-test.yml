@@ -141,3 +141,99 @@ jobs:
           }
           
           runTests
+
+      - name: Install packaging tools
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          python "${{ env.CRAFT_MASTER_LOCATION }}\CraftMaster.py" --config "${{ env.CRAFT_MASTER_CONFIG }}" --target ${{ env.CRAFT_TARGET }} -c dev-utils/nsis
+
+      - name: Package installer
+        shell: pwsh
+        run: |
+          function craft() {
+              python "${{ env.CRAFT_MASTER_LOCATION }}\CraftMaster.py" --config "${{ env.CRAFT_MASTER_CONFIG }}" --target ${{ env.CRAFT_TARGET }} -c $args
+              if($LASTEXITCODE -ne 0) {exit $LASTEXITCODE}
+          }
+
+          craft --src-dir ${{ github.workspace }} --package nextcloud-client
+
+      - name: Collect installer and portable build
+        if: always()
+        shell: pwsh
+        run: |
+          $root = "${{ github.workspace }}\${{ env.CRAFT_TARGET }}"
+          $out = "${{ github.workspace }}\artifact"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          $installer = Get-ChildItem -Path $root -Recurse -File -Filter *.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match '^nextcloud-.*\.exe$' } |
+              Sort-Object Length -Descending | Select-Object -First 1
+          if($installer) {
+              Copy-Item $installer.FullName $out
+              Write-Host "installer: $($installer.FullName)"
+          } else {
+              Write-Host "no installer matched; contents of $root\tmp:"
+              Get-ChildItem -Path "$root\tmp" -Recurse -ErrorAction SilentlyContinue |
+                  Select-Object FullName, Length | Format-Table -AutoSize
+          }
+
+          # The image directory is the file set the installer would lay down: running
+          # nextcloud.exe straight out of it needs no installation and leaves the
+          # tester's own client untouched.
+          $image = Get-ChildItem -Path "$root\build\nextcloud-client" -Directory -Filter "image-*" -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if($image) {
+              Write-Host "image: $($image.FullName)"
+              Compress-Archive -Path "$($image.FullName)\*" -DestinationPath "$out\nextcloud-client-portable.zip" -CompressionLevel Optimal
+          } else {
+              Write-Host "no image directory found under $root\build\nextcloud-client"
+              Get-ChildItem -Path "$root\build\nextcloud-client" -ErrorAction SilentlyContinue |
+                  Select-Object Name | Format-Table -AutoSize
+          }
+
+          $lines = New-Object System.Collections.Generic.List[string]
+          $lines.Add("Nextcloud desktop client - unofficial Windows build")
+          $lines.Add("")
+          $lines.Add("What this is built from")
+          $lines.Add("  base branch:   nextcloud/desktop stable-34.0")
+          $lines.Add("  base commit:   ecfa626b983545e77f639e13c879742e5923d404")
+          $lines.Add("  one patch on top, cherry-picked from 1ecdb7b3063220527259c55e143b72e4f1f165f6:")
+          $lines.Add("    fix(discovery): skip the lock check for files in their recorded state")
+          $lines.Add("    https://github.com/nextcloud/desktop/pull/10850")
+          $lines.Add("  built commit:  ${{ github.event.pull_request.head.sha || github.sha }}")
+          $lines.Add("")
+          $lines.Add("It is the released 34.0 branch plus that one change, so a measurement against")
+          $lines.Add("a 34.0.x baseline moves one variable. It is not built from master.")
+          $lines.Add("")
+          $lines.Add("Build")
+          $lines.Add("  run:     ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          $lines.Add("  target:  ${{ env.CRAFT_TARGET }}")
+          $lines.Add("  date:    $((Get-Date).ToUniversalTime().ToString('u'))")
+          $lines.Add("")
+          $lines.Add("This build is not signed. Windows SmartScreen will warn about it.")
+          $lines.Add("")
+          $lines.Add("Two ways to run it")
+          $lines.Add("  nextcloud-client-portable.zip - unpack it, quit your own client, run nextcloud.exe")
+          $lines.Add("    from the unpacked folder. Nothing is installed, your account and sync folders")
+          $lines.Add("    are picked up from the existing configuration, and going back means closing it")
+          $lines.Add("    and starting your own client again.")
+          $lines.Add("  nextcloud-*.exe - an NSIS installer, for a normal installation. Official releases")
+          $lines.Add("    ship as MSI, so this registers separately and is messier to undo.")
+          $lines.Add("")
+          $lines.Add("SHA-256")
+          Get-ChildItem "$out\*" -Include *.exe,*.zip -ErrorAction SilentlyContinue | ForEach-Object {
+              $h = (Get-FileHash -Algorithm SHA256 -Path $_.FullName).Hash
+              $lines.Add("  $h  $($_.Name)")
+          }
+          $lines | Out-File -FilePath "$out\BUILD-INFO.txt" -Encoding utf8
+          Get-Content "$out\BUILD-INFO.txt"
+
+      - name: Upload build
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nextcloud-client-stable-34.0-with-pr-10850
+          path: artifact/*
+          if-no-files-found: error
+          overwrite: true
