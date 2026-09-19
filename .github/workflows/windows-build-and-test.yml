@@ -148,6 +148,24 @@ jobs:
         run: |
           python "${{ env.CRAFT_MASTER_LOCATION }}\CraftMaster.py" --config "${{ env.CRAFT_MASTER_CONFIG }}" --target ${{ env.CRAFT_TARGET }} -c dev-utils/nsis
 
+      - name: Work around a missing import in the client blueprint
+        shell: pwsh
+        run: |
+          # craft-blueprints-nextcloud calls os.path.join in createPackage without
+          # importing os, so packaging dies on a NameError before writing anything.
+          $bp = "${{ github.workspace }}\${{ env.CRAFT_TARGET }}\etc\blueprints\locations\craft-blueprints-nextcloud\nextcloud-client\nextcloud-client.py"
+          if(!(Test-Path $bp)) {
+              Write-Host "blueprint not found at $bp"
+              exit 0
+          }
+          $text = Get-Content $bp -Raw
+          if($text -match '(?m)^import os\s*$') {
+              Write-Host "blueprint already imports os"
+          } else {
+              Set-Content -Path $bp -Value ("import os`r`n" + $text) -NoNewline
+              Write-Host "added 'import os' to the blueprint"
+          }
+
       - name: Package installer
         shell: pwsh
         run: |
@@ -181,7 +199,11 @@ jobs:
           # The image directory is the file set the installer would lay down: running
           # nextcloud.exe straight out of it needs no installation and leaves the
           # tester's own client untouched.
-          $image = Get-ChildItem -Path "$root\build\nextcloud-client" -Directory -Filter "image-*" -ErrorAction SilentlyContinue |
+          $images = @(Get-ChildItem -Path "$root\build\nextcloud-client" -Directory -Filter "image-*" -ErrorAction SilentlyContinue)
+          Write-Host "image directories: $($images.Name -join ', ')"
+          # Craft writes the debug symbols into a second image directory suffixed -dbg.
+          # That one holds only .pdb files, so the application image is the other one.
+          $image = $images | Where-Object { $_.Name -notlike '*-dbg' } |
               Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if($image) {
               Write-Host "image: $($image.FullName)"
@@ -218,8 +240,10 @@ jobs:
           $lines.Add("    from the unpacked folder. Nothing is installed, your account and sync folders")
           $lines.Add("    are picked up from the existing configuration, and going back means closing it")
           $lines.Add("    and starting your own client again.")
-          $lines.Add("  nextcloud-*.exe - an NSIS installer, for a normal installation. Official releases")
-          $lines.Add("    ship as MSI, so this registers separately and is messier to undo.")
+          if($installer) {
+              $lines.Add("  $($installer.Name) - an NSIS installer, for a normal installation. Official")
+              $lines.Add("    releases ship as MSI, so this registers separately and is messier to undo.")
+          }
           $lines.Add("")
           $lines.Add("SHA-256")
           Get-ChildItem "$out\*" -Include *.exe,*.zip -ErrorAction SilentlyContinue | ForEach-Object {
